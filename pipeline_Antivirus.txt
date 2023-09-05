@@ -1,0 +1,303 @@
+pipeline {
+	
+	agent { label 'jenbld' }
+
+	environment {
+		
+		// For Anti Virus Scanning
+		AV_USER = "build"
+		AV_HOST = "avtest01.emeter.com"
+		AV_ID   = "$AV_USER@$AV_HOST"
+		AV_HOME = "/data/build"
+
+		SSH_OPTS = "-o UserKnownHostsFile=/dev/null -o LogLevel=quiet -o StrictHostKeyChecking=no -o ServerAliveInterval=100"
+	}
+
+	stages {
+
+		stage('Checkout') {
+			steps {
+				cleanWs()
+
+				checkout perforce(credential: 'e1bfcfdc-4441-4940-8ae3-28e1f4d59879', populate: forceClean(have: false, parallel: [enable: false, minbytes: '1024', minfiles: '1', threads: '4'], pin: '', quiet: true), workspace: manualSpec(charset: 'none', name: 'jenkins-${NODE_NAME}-${JOB_NAME}', pinHost: false, spec: clientSpec(allwrite: false, backup: false, clobber: false, compress: false, line: 'LOCAL', locked: false, modtime: false, rmdir: false, serverID: '', streamName: '', type: 'WRITABLE', view: '''//RE/buildtools/scripts/deploytoartifactory_with_properties.sh //jenkins-${NODE_NAME}-${JOB_NAME}/deploytoartifactory.sh
+//RE/buildtools/scripts/getfromartifactory.sh //jenkins-${NODE_NAME}-${JOB_NAME}/getfromartifactory.sh''')))
+
+			}
+		}
+
+		stage('Scan for Viruses') {
+			steps {
+				sh '''
+					#!/bin/bash -ex
+					set +x;
+
+					echo ""
+					echo "[INFO] VALIDATING EXISTING VIRUS SCAN PROCESS"
+					SCAN_PS=`ssh $SSH_OPTS $AV_ID "cd $AV_HOME && ps -u root | grep splx_manual | wc -l"`
+					if [ $SCAN_PS -eq 0 ]
+					then
+						echo "---->  NO EXISTING SCANNING IN PROGRESS  \u2705"
+					else
+						until [ "$SCAN_PS" -eq 0 ]
+						do
+							echo "---->  EXISTING SCANNING COMPLETED  \u274C"
+							sleep 2
+							SCAN_PS=`ssh $SSH_OPTS $AV_ID "cd $AV_HOME && ps -u root | grep splx_manual | wc -l"`
+						done
+						echo "---->  NO EXISTING SCANNING IN PROGRESS  \u2705"
+					fi
+
+					#===========================================#
+					# Remvoing old files from $AV_HOST:$AV_HOME #
+					#===========================================#
+					echo ""
+					echo "[INFO] REMOVING & VALIDATING OLD DATA FROM $AV_HOST:$AV_HOME"
+					ssh $SSH_OPTS $AV_ID "cd $AV_HOME && rm -rf *"
+					FILE_COUNT=`ssh $SSH_OPTS $AV_ID "cd $AV_HOME && find . -type f | wc -l"`
+					if [ $FILE_COUNT -eq 0 ]
+					then 
+						echo "---->  OLD DATA REMOVED SUCCESSFULLY  \u2705"
+					else
+						echo "---->  ERROR REMOVING OLD DATA  \u274C"
+					fi
+
+					#=======================================#
+					# Downloading JARs on $AV_HOST:$AV_HOME #
+					#=======================================#
+					echo ""
+					echo "[INFO] DOWNLOADING JARs ON $AV_HOST:$AV_HOME"
+					OSS_BINARY_DOWNLOAD=$JAR_URL
+					
+					COUNT=1
+					for JAR in $OSS_BINARY_DOWNLOAD
+					do
+						ssh $SSH_OPTS $AV_ID "cd $AV_HOME && \
+						mkdir jar$COUNT && chmod -R 777 jar$COUNT && cd jar$COUNT && \
+						wget -q --no-check-certificate $JAR && \
+						scp -r $SSH_OPTS * build@${NODE_NAME}.emeter.com:/${WORKSPACE}/."
+						if [ $? -eq 0 ]
+						then
+							JAR_STATUS=0
+						else
+							JAR_STATUS=1
+						fi
+						COUNT=`expr $COUNT + 1`
+					done
+
+					if [ "$ADD_SRC_JAR" = "true" ]
+					then
+						for SRCJAR in $OSS_SOURCE_DOWNLOAD
+						do
+							ssh $SSH_OPTS $AV_ID "cd $AV_HOME && \
+							mkdir jar$COUNT && chmod -R 777 jar$COUNT && cd jar$COUNT && \
+							wget -q --no-check-certificate $SRCJAR && \
+							scp -r $SSH_OPTS * build@${NODE_NAME}.emeter.com:/${WORKSPACE}/."
+							if [ $? -eq 0 ]
+							then
+								JAR_STATUS=0
+							else
+								JAR_STATUS=1
+							fi
+							COUNT=`expr $COUNT + 1`
+						done
+					fi
+					
+					if [ $JAR_STATUS -eq 0 ]
+					then
+						echo "---->  JARs DOWNLOADED SUCCESSFULLY  \u2705"
+					else
+						echo "---->  ERROR DOWNLOADING JARs  \u274C"
+					fi
+					
+					#======================================#
+					# Exploding Files on $AV_HOST:$AV_HOME #
+					#======================================#
+					echo ""
+					echo "[INFO] EXPLODING FILES (JARs | WARs | ZIPs) ON $AV_HOST:$AV_HOME"
+					ssh $SSH_OPTS $AV_ID "cd $AV_HOME && ~/bin/explode.sh > /dev/null 2>&1"
+					if [ $? -eq 0 ]
+					then
+						echo "---->  FILES EXPLODED SUCCESSFULLY  \u2705"
+					else
+						echo "---->  ERROR EXPLODING FILES  \u274C"
+					fi
+					
+					#==============================#
+					# Counting files after explode #
+					#==============================#
+					echo ""
+					echo "[INFO] VALIDATING # OF JARs | WARs | ZIPs AFTER EXPLODING ON $AV_HOST:$AV_HOME"
+					JAR_COUNT_A=`ssh $SSH_OPTS $AV_ID "cd $AV_HOME && find . -name "*.jar" | wc -l"`
+					WAR_COUNT_A=`ssh $SSH_OPTS $AV_ID "cd $AV_HOME && find . -name "*.war" | wc -l"`
+					ZIP_COUNT_A=`ssh $SSH_OPTS $AV_ID "cd $AV_HOME && find . -name "*.zip" | wc -l"`
+					FILE_COUNT_A=`ssh $SSH_OPTS $AV_ID "cd $AV_HOME && find . -type f | wc -l"`
+
+					if [ $JAR_COUNT_A -eq 0 ] && [ $WAR_COUNT_A -eq 0 ] && [ $ZIP_COUNT_A -eq 0 ]
+					then
+						echo "---->  JAR = $JAR_COUNT_A | WAR = $WAR_COUNT_A | ZIP = $ZIP_COUNT_A | FILES = $FILE_COUNT_A  \u2705"
+					else
+						echo "---->  JAR = $JAR_COUNT_A | WAR = $WAR_COUNT_A | ZIP = $ZIP_COUNT_A | FILES = $FILE_COUNT_A  \u274C"
+					fi
+					
+					#==========================================#
+					# Running Manual Scan through Command Line #
+					#==========================================#
+					echo ""
+					echo "[INFO] RUNNING MANUAL AV SCAN ON $AV_HOST:$AV_HOME"
+					AV_START_TIME=`date "+%Y/%m/%d %H:%M:%S"`
+					ssh $SSH_OPTS $AV_ID "sudo /opt/TrendMicro/SProtectLinux/SPLX.vsapiapp/splxmain -m $AV_HOME"
+					if [ $? -eq 0 ]
+					then
+						AV_END_TIME=`date "+%Y/%m/%d %H:%M:%S"`
+						echo "---->  MANUAL SCAN COMPLETED SUCCESSFULLY  \u2705"
+					else
+						AV_END_TIME=`date "+%Y/%m/%d %H:%M:%S"`
+						"---->  ERROR RUNNING MANUAL SCAN  \u274C"
+					fi
+					
+					LOG_DIR="/var/log/TrendMicro/SProtectLinux"
+					SCAN_LOG="Scan.`date +%Y%m%d`.0001"
+					VIRUS_LOG="Virus.`date +%Y%m%d`.0001"
+					SPYWARE_LOG="Spyware.`date +%Y%m%d`.0001"
+
+					#======================#
+					# Collecting Scan Logs #
+					#======================#
+					echo ""
+					echo "[INFO] COLLECTING SCAN LOGS FROM $AV_HOST:$AV_HOME"
+					ssh $SSH_OPTS $AV_ID "cd $AV_HOME && sudo cp $LOG_DIR/$SCAN_LOG $LOG_DIR/$VIRUS_LOG $LOG_DIR/$SPYWARE_LOG . && sudo chmod 644 *.0001 && scp -q $SSH_OPTS *.0001 build@${NODE_NAME}.emeter.com:/${WORKSPACE}/."
+					if [ $? -eq 0 ]
+					then
+						echo "---->  SCAN LOGS COPIED SUCCESSFULLUY  \u2705"
+					else
+						echo "---->  ERROR COPYING SCAN LOGS  \u2705"
+					fi
+
+					#==========================#
+					# Checking Virus #
+					#==========================#
+					echo ""
+					echo "[INFO] VALIDATING VIRUS FOUND"
+					if [ ! -s $VIRUS_LOG ]
+					then
+						echo "---->  NO VIRUS FOUND  \u2705"
+					else
+						echo "---->  VIRUS FOUND  \u274C"
+					fi
+
+					#==========================#
+					# Checking Virus Count #
+					#==========================#
+					echo ""
+					echo "[INFO] VALIDATING INFECTED FILES COUNT"						
+					SCAN_VIRUS_COUNT=`cat ${WORKSPACE}/$SCAN_LOG | grep virus_count | tail -1 | awk -F'=' '{print $2}'`
+					if [ $? -eq 0 ]
+					then
+						if [ $SCAN_VIRUS_COUNT -eq 0 ]
+						then
+							echo "---->  ${SCAN_VIRUS_COUNT} INFECTED FILES FOUND  \u2705"
+						else
+							echo "---->  ${SCAN_VIRUS_COUNT} INFECTED FILES FOUND  \u274C"
+						fi
+					else
+						echo "---->  ERROR VALIDATING VIRUS COUNT  \u274C"
+					fi
+
+					#==========================#
+					# Checking Malware #
+					#==========================#
+					echo ""
+					echo "[INFO] VALIDATING INFECTED FILES COUNT"
+					if [ ! -s $SPYWARE_LOG ]
+					then
+						echo "---->  NO SPYWARE FOUND  \u2705"
+					else
+						echo "---->  SPYWARE FOUND  \u274C"
+					fi
+
+					#===============================#
+					# Check for Scanned Files Count #
+					#===============================#
+					echo ""
+					echo "[INFO] VALIDATING SCANNED FILES COUNT"
+					SCAN_FILE_COUNT=`cat ${WORKSPACE}/$SCAN_LOG | grep message_count | tail -1 | awk -F'=' '{print $2}'`
+					if [ $? -eq 0 ]
+					then
+						if [ $SCAN_FILE_COUNT -eq $FILE_COUNT_A ]
+						then
+							echo "---->  ${SCAN_FILE_COUNT} FILES SCANNED. MATCHED  \u2705"
+						else
+							echo "---->  ${SCAN_FILE_COUNT} FILES SCANNED. MISMATCH FOUND  \u274C"
+						fi
+					else
+						echo "---->  ERROR VALIDATING SCANNED FILES COUNT  \u274C"
+					fi
+
+					SCAN_START_TIME=`cat ${WORKSPACE}/$SCAN_LOG | grep start_time | tail -1 | awk -F'=' '{print $2}'`
+					SCAN_END_TIME=`cat ${WORKSPACE}/$SCAN_LOG | grep end_time | tail -1 | awk -F'=' '{print $2}'`						
+					
+				'''
+				input 'Proceed ?' 
+			}
+		}
+		
+		stage('Deploy to Artifactory') {
+			steps {
+				sh '''
+					#!/bin/bash -ex
+					set +x;
+					echo ""
+
+					DELIMETER=maven2
+					TP_REPO_PATH="http://artifactory01.emeter.com:8081/artifactory/api/storage/dev-3rdparty"
+					#TP_REPO_PATH="http://artifactory01.emeter.com:8081/artifactory/api/storage/eip-3rdparty"
+					#EXT_REPO_PATH="http://artifactory01.emeter.com:8081/artifactory/api/storage/energyip-ext"
+					JARS=$JAR_URL
+
+					for JAR in $JARS
+					do
+						JARFILE=`echo $JAR | awk -F'/' '{print $NF}'`
+						VERSION=`echo $JAR | awk -F'/' '{print $(NF-1)}'`
+						MODULE=`echo $JAR  | awk -F'/' '{print $(NF-2)}'`
+						ORG=`echo $JAR     | awk -v FS="$DELIMETER" '{print $2}' | awk -F'/' '{NF-=3}1'`
+						ORG1=`echo $ORG    | sed 's/ /./g'`
+						ORG2=`echo $ORG    | sed 's/ /\\\\//g'`
+						
+						echo ""
+						echo "[INFO] PUBLISHING $TP_REPO_PATH/$ORG1/$MODULE/$VERSION/$JARFILE"
+						deploytoartifactory.sh artifactory01 dev-3rdparty "$ORG1" "$MODULE" "$VERSION" "$JARFILE" "$EIPSCRUMTEAM" "$OSS_COMPONENT_NAME" "$OSS_VENDOR" "$OSS_PROJECT_DESCRIPTION" "$UPGRADE_FREQUENTLY" > deploy.log
+						if [ $? -eq 0 ]
+						then
+							LOCAL_SHA256=`sha256sum $JARFILE | awk '{print $1}'`
+							REMOTE_SHA256=`curl -s -u pubuser:embu1ld -X GET $TP_REPO_PATH/$ORG1/$MODULE/$VERSION/$JARFILE | jq -r .checksums.sha256`
+							echo "---->  LOCAL_SHA256  = $LOCAL_SHA256"
+							echo "---->  REMOTE_SHA256 = $REMOTE_SHA256"
+							if [ $LOCAL_SHA256 = $REMOTE_SHA256 ]
+							then
+								echo "---->  $JARFILE PUBLISHED SUCCESSFULLY  \u2705"
+							else
+								echo "---->  ERROR PUBLISHING $JARFILE  \u274C"
+							fi
+						else
+							echo "---->  ERROR PUBLISHING $JARFILE  \u274C"
+						fi
+						
+						getfromartifactory.sh artifactory01 dev-3rdparty "$ORG1" "$MODULE" "$VERSION" ivy.xml > $JARFILE.xml
+						if [ $? -ne 0 ]
+						then
+							echo "---->  ERROR CREATING $JARFILE.xml  \u274C"
+						fi
+					done
+				'''
+				
+				
+			}
+		}
+		
+		stage('Archive Logs') {
+			steps {
+				archiveArtifacts '*.log, *.0001'
+			}
+		}
+	}
+}
